@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual envs
+env/
+venv/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data & models
+data/raw/*
+data/processed/*
+models/trained/*
+models/onnx/*
+
+# Cache
+*.cache
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+env/
+venv/
+.venv/
+parking-ai/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS junk
+.DS_Store
+
+# OpenCV / dataset data
+data/raw/
+data/processed/rois.json.bak
+
+# Model outputs
+models/trained/
+models/onnx/
+
+# Logs
+*.log
