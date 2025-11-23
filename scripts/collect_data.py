@@ -25,6 +25,7 @@ import json
 import argparse
 import os
 from datetime import datetime
+import numpy as np
 
 ROIS_PATH = "data/processed/rois.json"
 RAW_DATA_DIR = "data/raw"
