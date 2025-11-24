@@ -84,7 +84,7 @@ def pil_from_numpy(arr: np.ndarray) -> Image.Image:
 
 # ---------- Inference loop (background thread) ----------
 
-def inference_loop(camera_index: int = 0, poll_delay: float = 0.2):
+def inference_loop(camera_index: int = 0, poll_delay: float = 0.05):
     global slot_status, latest_frame_jpeg
 
     device = get_device()
@@ -403,7 +403,7 @@ def video_feed():
             if frame is not None:
                 yield (b"--frame\r\n"
                        b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
-            time.sleep(0.05)
+            time.sleep(0.01)
     return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
