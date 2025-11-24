@@ -27,7 +27,7 @@ from torchvision import models, transforms
 import numpy as np
 from PIL import Image
 
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, Response
 
 
 ROIS_PATH = "data/processed/rois.json"
@@ -35,6 +35,7 @@ MODEL_PATH = "models/trained/slot_classifier_best.pth"
 
 # Shared state between inference loop and Flask
 slot_status: Dict[str, Dict] = {}  # e.g. {"A1": {"status": "empty", "conf": 0.98}}
+latest_frame_jpeg = None  # type: ignore  # most recent annotated frame as JPEG bytes
 
 
 # ---------- Utilities ----------
@@ -84,7 +85,7 @@ def pil_from_numpy(arr: np.ndarray) -> Image.Image:
 # ---------- Inference loop (background thread) ----------
 
 def inference_loop(camera_index: int = 0, poll_delay: float = 0.2):
-    global slot_status
+    global slot_status, latest_frame_jpeg
 
     device = get_device()
     print(f"[INF] Inference using device: {device}")
@@ -120,6 +121,7 @@ def inference_loop(camera_index: int = 0, poll_delay: float = 0.2):
                 time.sleep(1.0)
                 continue
 
+            display = frame.copy()
             h0, w0 = frame.shape[:2]
             current_status: Dict[str, Dict] = {}
 
@@ -154,8 +156,21 @@ def inference_loop(camera_index: int = 0, poll_delay: float = 0.2):
                     "conf": conf_val,
                 }
 
-            # Atomically replace global
+                # Draw overlay on display frame
+                if pred_class == "empty":
+                    color = (0, 255, 0)
+                else:
+                    color = (0, 0, 255)
+                cv2.rectangle(display, (x1, y1), (x2, y2), color, 2)
+                label_text = f"{sid}:{pred_class} {conf_val:.2f}"
+                cv2.putText(display, label_text, (x1, y1 - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+            # Atomically replace global status and latest frame
             slot_status = current_status
+            ok, jpeg = cv2.imencode(".jpg", display)
+            if ok:
+                latest_frame_jpeg = jpeg.tobytes()
 
             time.sleep(poll_delay)
     except KeyboardInterrupt:
@@ -293,6 +308,12 @@ DASHBOARD_HTML = """
         <p><span id="total-count">0</span></p>
       </div>
     </div>
+    <div style="margin-bottom:24px;">
+      <h2 style="font-size:16px; margin:0 0 8px 0;">Live Camera Preview</h2>
+      <div style="border-radius:12px; overflow:hidden; border:1px solid #1f2937; max-width:640px;">
+        <img id="camera-feed" src="/video_feed" style="display:block; width:100%; height:auto;" />
+      </div>
+    </div>
     <div class="slots-grid" id="slots-grid">
       <!-- Filled by JS -->
     </div>
@@ -370,6 +391,20 @@ def dashboard():
 def api_status():
     # Just return the latest slot_status dict
     return jsonify(slot_status=slot_status)
+
+
+@app.route("/video_feed")
+def video_feed():
+    """MJPEG stream of the latest annotated camera frame."""
+    def generate():
+        global latest_frame_jpeg
+        while True:
+            frame = latest_frame_jpeg
+            if frame is not None:
+                yield (b"--frame\r\n"
+                       b"Content-Type: image/jpeg\r\n\r\n" + frame + b"\r\n")
+            time.sleep(0.05)
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
 # ---------- Entry point ----------
