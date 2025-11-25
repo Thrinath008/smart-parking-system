@@ -6,6 +6,7 @@ Run real-time parking slot inference in the background and expose:
 
 - A web dashboard at `/` (HTML+JS) to visualize slot status
 - A JSON API at `/api/status` with current slot predictions
+- A JSON API at `/api/logs` returning recent occupancy logs
 
 Usage:
   python scripts/web_dashboard.py --camera 0
@@ -18,7 +19,9 @@ import json
 import argparse
 import threading
 import time
-from typing import Dict
+import csv
+from typing import Dict, List, Any
+from datetime import datetime
 
 import cv2
 import torch
@@ -32,10 +35,17 @@ from flask import Flask, jsonify, render_template_string, Response
 
 ROIS_PATH = "data/processed/rois.json"
 MODEL_PATH = "models/trained/slot_classifier_best.pth"
+LOG_DIR = "data/logs"
+LOG_CSV = os.path.join(LOG_DIR, "occupancy_log.csv")
 
 # Shared state between inference loop and Flask
-slot_status: Dict[str, Dict] = {}  # e.g. {"A1": {"status": "empty", "conf": 0.98}}
+slot_status: Dict[str, Dict] = {}  # e.g. {"A1": {"status": "empty", "conf": 0.98, "last_duration": 0.0, "total_occupied": 0.0}}
 latest_frame_jpeg = None  # type: ignore  # most recent annotated frame as JPEG bytes
+
+# Internal tracking: start time per slot when it became occupied
+slot_timers: Dict[str, float] = {}
+# Simple in-memory log buffer (also persisted to CSV)
+occupancy_logs: List[Dict[str, Any]] = []
 
 
 # ---------- Utilities ----------
@@ -82,10 +92,28 @@ def pil_from_numpy(arr: np.ndarray) -> Image.Image:
     return Image.fromarray(arr)
 
 
+def ensure_log_dir():
+    os.makedirs(LOG_DIR, exist_ok=True)
+    if not os.path.exists(LOG_CSV):
+        # create CSV with header
+        with open(LOG_CSV, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "slot_id", "duration_seconds", "start_time", "end_time"]) 
+
+
+def append_log_csv(slot_id: str, start_ts: float, end_ts: float, duration: float):
+    ensure_log_dir()
+    row = [datetime.utcfromtimestamp(end_ts).isoformat() + "Z", slot_id, f"{duration:.3f}",
+           datetime.utcfromtimestamp(start_ts).isoformat() + "Z", datetime.utcfromtimestamp(end_ts).isoformat() + "Z"]
+    with open(LOG_CSV, "a", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(row)
+
+
 # ---------- Inference loop (background thread) ----------
 
 def inference_loop(camera_index: int = 0, poll_delay: float = 0.05):
-    global slot_status, latest_frame_jpeg
+    global slot_status, latest_frame_jpeg, slot_timers, occupancy_logs
 
     device = get_device()
     print(f"[INF] Inference using device: {device}")
@@ -136,7 +164,7 @@ def inference_loop(camera_index: int = 0, poll_delay: float = 0.05):
                 y1 = max(0, min(y, h0 - 1))
 
                 if x1 >= x2 or y1 >= y2:
-                    current_status[sid] = {"status": "invalid", "conf": 0.0}
+                    current_status[sid] = {"status": "invalid", "conf": 0.0, "last_duration": 0.0, "total_occupied": 0.0}
                     continue
 
                 crop = frame[y1:y2, x1:x2]
@@ -151,16 +179,65 @@ def inference_loop(camera_index: int = 0, poll_delay: float = 0.05):
                     pred_class = idx_to_class[int(pred_idx)]
                     conf_val = float(conf.item())
 
+                # previous status
+                prev = slot_status.get(sid, {})
+                prev_state = prev.get("status") if prev else None
+
+                # Handle transitions for logging durations
+                now_ts = time.time()
+                last_duration = prev.get("last_duration", 0.0) if prev else 0.0
+                total_occupied = prev.get("total_occupied", 0.0) if prev else 0.0
+
+                if pred_class == "occupied":
+                    # If it just became occupied, record start
+                    if prev_state != "occupied":
+                        slot_timers[sid] = now_ts
+                    # compute ongoing duration
+                    start_ts = slot_timers.get(sid, now_ts)
+                    ongoing = now_ts - start_ts
+                    last_duration = ongoing
+                elif pred_class == "empty":
+                    # If it was occupied and now became empty, finalize duration
+                    if prev_state == "occupied" and sid in slot_timers:
+                        start_ts = slot_timers.pop(sid)
+                        end_ts = now_ts
+                        duration = end_ts - start_ts
+                        last_duration = duration
+                        total_occupied = (prev.get("total_occupied", 0.0) or 0.0) + duration
+                        # append to CSV and in-memory log
+                        log_entry = {
+                            "timestamp": datetime.utcfromtimestamp(end_ts).isoformat() + "Z",
+                            "slot_id": sid,
+                            "duration_seconds": float(f"{duration:.3f}"),
+                            "start_time": datetime.utcfromtimestamp(start_ts).isoformat() + "Z",
+                            "end_time": datetime.utcfromtimestamp(end_ts).isoformat() + "Z",
+                        }
+                        occupancy_logs.append(log_entry)
+                        append_log_csv(sid, start_ts, end_ts, duration)
+                    else:
+                        # remain empty
+                        last_duration = prev.get("last_duration", 0.0) if prev else 0.0
+                        total_occupied = prev.get("total_occupied", 0.0) if prev else 0.0
+                else:
+                    # invalid or unknown
+                    last_duration = prev.get("last_duration", 0.0) if prev else 0.0
+                    total_occupied = prev.get("total_occupied", 0.0) if prev else 0.0
+
                 current_status[sid] = {
                     "status": pred_class,
                     "conf": conf_val,
+                    "last_duration": float(last_duration),
+                    "total_occupied": float(total_occupied),
                 }
 
                 # Draw overlay on display frame
                 if pred_class == "empty":
                     color = (0, 255, 0)
-                else:
+                elif pred_class == "occupied":
                     color = (0, 0, 255)
+                else:
+                    color = (0, 180, 180)
+
                 cv2.rectangle(display, (x1, y1), (x2, y2), color, 2)
                 label_text = f"{sid}:{pred_class} {conf_val:.2f}"
                 cv2.putText(display, label_text, (x1, y1 - 8),
@@ -272,6 +349,10 @@ DASHBOARD_HTML = """
       font-size: 12px;
       color: #9ca3af;
     }
+    .slot-duration {
+      font-size: 12px;
+      color: #9ca3af;
+    }
     .pill {
       display: inline-block;
       padding: 2px 8px;
@@ -317,6 +398,10 @@ DASHBOARD_HTML = """
     <div class="slots-grid" id="slots-grid">
       <!-- Filled by JS -->
     </div>
+    <div style="margin-top:20px;">
+      <h3 style="margin:0 0 8px 0;">Recent occupancy logs</h3>
+      <div id="logs" style="font-size:13px; color:#9ca3af; max-height:180px; overflow:auto; background:#081025; padding:8px; border-radius:8px; border:1px solid #122030;"></div>
+    </div>
   </main>
 
   <script>
@@ -337,6 +422,8 @@ DASHBOARD_HTML = """
           const info = slots[id];
           const status = info.status || 'unknown';
           const conf = info.conf != null ? info.conf : 0.0;
+          const last_dur = info.last_duration != null ? info.last_duration : 0.0;
+          const total_occ = info.total_occupied != null ? info.total_occupied : 0.0;
 
           if (status === 'empty') emptyCount++;
           if (status === 'occupied') occCount++;
@@ -356,9 +443,14 @@ DASHBOARD_HTML = """
           confEl.className = 'slot-conf';
           confEl.textContent = 'Confidence: ' + (conf * 100).toFixed(1) + '%';
 
+          const durEl = document.createElement('div');
+          durEl.className = 'slot-duration';
+          durEl.textContent = 'Last occ: ' + (last_dur > 0 ? (Math.round(last_dur) + 's') : '--') + ' | Total: ' + Math.round(total_occ) + 's';
+
           div.appendChild(idEl);
           div.appendChild(statusEl);
           div.appendChild(confEl);
+          div.appendChild(durEl);
           grid.appendChild(div);
         });
 
@@ -374,8 +466,26 @@ DASHBOARD_HTML = """
       }
     }
 
-    setInterval(fetchStatus, 1000);
-    window.onload = fetchStatus;
+    async function fetchLogs() {
+      try {
+        const res = await fetch('/api/logs');
+        if (!res.ok) return;
+        const data = await res.json();
+        const logs = data.logs || [];
+        const el = document.getElementById('logs');
+        el.innerHTML = '';
+        logs.forEach(l => {
+          const row = document.createElement('div');
+          row.textContent = `${l.timestamp}  ${l.slot_id}  ${l.duration_seconds}s`;
+          el.appendChild(row);
+        });
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    setInterval(() => { fetchStatus(); fetchLogs(); }, 1000);
+    window.onload = () => { fetchStatus(); fetchLogs(); };
   </script>
 </body>
 </html>
@@ -389,8 +499,15 @@ def dashboard():
 
 @app.route("/api/status")
 def api_status():
-    # Just return the latest slot_status dict
+    # Return the latest slot_status dict
     return jsonify(slot_status=slot_status)
+
+
+@app.route("/api/logs")
+def api_logs():
+    # Return recent in-memory logs (last 50)
+    recent = occupancy_logs[-50:][::-1]
+    return jsonify(logs=recent)
 
 
 @app.route("/video_feed")
