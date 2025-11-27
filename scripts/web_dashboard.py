@@ -110,6 +110,16 @@ def append_log_csv(slot_id: str, start_ts: float, end_ts: float, duration: float
 # ---------- Inference loop (background thread) ----------
 
 def inference_loop(camera_index: int = 0, poll_delay: float = 0.05):
+    """
+    Background loop:
+    - Grabs frames from the camera
+    - Runs batched inference over all valid ROIs (single forward pass)
+    - Updates global slot_status and latest_frame_jpeg
+
+    Optimizations:
+    - Single model forward per frame (batch of ROIs) instead of per-ROI forward
+    - CPU-only for stability
+    """
     global slot_status, latest_frame_jpeg, slot_timers, occupancy_logs
 
     device = get_device()
@@ -148,8 +158,9 @@ def inference_loop(camera_index: int = 0, poll_delay: float = 0.05):
 
             display = frame.copy()
             h0, w0 = frame.shape[:2]
-            current_status: Dict[str, Dict] = {}
 
+            # First pass: collect ROI crops/tensors to build a batch
+            roi_entries = []  # list of dicts with sid, coords, tensor (or None if invalid)
             for r in rois:
                 sid = r["id"]
                 x, y, w, h = r["bbox"]
@@ -160,19 +171,55 @@ def inference_loop(camera_index: int = 0, poll_delay: float = 0.05):
                 x1 = max(0, min(x, w0 - 1))
                 y1 = max(0, min(y, h0 - 1))
 
+                entry = {
+                    "sid": sid,
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                    "tensor": None,
+                }
+
                 if x1 >= x2 or y1 >= y2:
-                    current_status[sid] = {"status": "invalid", "conf": 0.0, "last_duration": 0.0, "total_occupied": 0.0}
+                    # invalid / out of frame
+                    roi_entries.append(entry)
                     continue
 
                 crop = frame[y1:y2, x1:x2]
                 crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
                 pil_img = pil_from_numpy(crop_rgb)
-                input_tensor = transform(pil_img).unsqueeze(0).to(device)
+                input_tensor = transform(pil_img)
+                entry["tensor"] = input_tensor
+                roi_entries.append(entry)
 
+            # Build batch for valid ROIs
+            valid_indices = [i for i, e in enumerate(roi_entries) if e["tensor"] is not None]
+            probs_batch = None
+            if valid_indices:
+                batch_tensors = [roi_entries[i]["tensor"] for i in valid_indices]
+                inputs = torch.stack(batch_tensors, dim=0).to(device)
                 with torch.no_grad():
-                    logits = model(input_tensor)
-                    probs = torch.softmax(logits, dim=1)[0]
-                    conf, pred_idx = torch.max(probs, dim=0)
+                    logits = model(inputs)
+                    probs_batch = torch.softmax(logits, dim=1)
+
+            current_status: Dict[str, Dict] = {}
+            valid_ptr = 0  # index into probs_batch
+
+            # Second pass: interpret predictions, update timers and draw overlays
+            for idx, e in enumerate(roi_entries):
+                sid = e["sid"]
+                x1, y1, x2, y2 = e["x1"], e["y1"], e["x2"], e["y2"]
+
+                if e["tensor"] is None:
+                    # Invalid ROI
+                    pred_class = "invalid"
+                    conf_val = 0.0
+                else:
+                    # Get corresponding probs row from batch
+                    assert probs_batch is not None
+                    p = probs_batch[valid_ptr]
+                    valid_ptr += 1
+                    conf, pred_idx = torch.max(p, dim=0)
                     pred_class = idx_to_class[int(pred_idx)]
                     conf_val = float(conf.item())
 
@@ -232,13 +279,16 @@ def inference_loop(camera_index: int = 0, poll_delay: float = 0.05):
                     color = (0, 255, 0)
                 elif pred_class == "occupied":
                     color = (0, 0, 255)
-                else:
+                elif pred_class == "invalid":
                     color = (0, 180, 180)
+                else:
+                    color = (128, 128, 128)
 
-                cv2.rectangle(display, (x1, y1), (x2, y2), color, 2)
-                label_text = f"{sid}:{pred_class} {conf_val:.2f}"
-                cv2.putText(display, label_text, (x1, y1 - 8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                if not (x1 >= x2 or y1 >= y2):
+                    cv2.rectangle(display, (x1, y1), (x2, y2), color, 2)
+                    label_text = f"{sid}:{pred_class} {conf_val:.2f}"
+                    cv2.putText(display, label_text, (x1, y1 - 8),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
             # Atomically replace global status and latest frame
             slot_status = current_status
