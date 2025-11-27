@@ -72,10 +72,7 @@ def create_model(num_classes: int = 2):
 
 
 def get_device():
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    if torch.cuda.is_available():
-        return torch.device("cuda")
+    # Force CPU for smoother, more stable webcam + UI behavior on macOS
     return torch.device("cpu")
 
 
