@@ -441,27 +441,50 @@ DASHBOARD_HTML = """
   <meta charset="utf-8" />
   <title>Smart Parking Dashboard</title>
   <style>
-    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f172a; color: #e5e7eb; margin: 0; padding: 0; }
-    header { padding: 16px 24px; border-bottom: 1px solid #1f2937; display: flex; justify-content: space-between; align-items: center; }
-    header h1 { margin: 0; font-size: 20px; }
+    html,body{height:100%;margin:0;padding:0}
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f172a; color: #e5e7eb; margin: 0; padding: 0; overflow-x:auto }
+    header { padding: 12px 20px; border-bottom: 1px solid #1f2937; display: flex; justify-content: space-between; align-items: center; }
+    header h1 { margin: 0; font-size: 18px; }
     header span { font-size: 13px; color: #9ca3af; }
-    main { padding: 24px; }
-    .summary { display: flex; gap: 16px; margin-bottom: 24px; }
-    .card { padding: 16px 20px; border-radius: 12px; background: #111827; border: 1px solid #1f2937; flex: 1; }
-    .card h2 { margin: 0 0 4px 0; font-size: 16px; }
-    .card p { margin: 0; font-size: 14px; color: #9ca3af; }
-    .slots-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
-    .slot { border-radius: 12px; padding: 12px; border: 1px solid #1f2937; background: #020617; display: flex; flex-direction: column; gap: 4px; }
-    .slot-id { font-weight: 600; font-size: 14px; }
-    .slot-status { font-size: 13px; font-weight: 500; }
+    .container { padding: 16px; }
+
+    /* Layout: left = camera, right = slots panel */
+    .main-flex { display: flex; gap: 18px; align-items: flex-start; flex-wrap: nowrap; }
+
+    /* Camera box: fixed width and height so the right panel remains beside it */
+    .camera-col { flex: 0 0 640px; }
+    .camera-box { width: 640px; height: 480px; border-radius:12px; overflow:hidden; border:1px solid #1f2937; background:#020617; display:block }
+    .camera-box img { display:block; width:100%; height:100%; object-fit:cover; }
+
+    /* Slots panel: fixed width so it stays to the right of camera */
+    .slots-panel { flex: 0 0 420px; width:420px; display: flex; flex-direction: column; gap: 12px; }
+
+    /* Summary cards at top of right panel */
+    .summary { display: flex; gap: 12px; margin-bottom: 8px; }
+    .card { padding: 10px 12px; border-radius: 10px; background: #111827; border: 1px solid #1f2937; flex: 1; }
+    .card h2 { margin: 0 0 4px 0; font-size: 13px; }
+    .card p { margin: 0; font-size: 13px; color: #9ca3af; }
+
+    /* Slots grid: 3 columns x 2 rows */
+    .slots-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .slot { border-radius: 10px; padding: 10px; border: 1px solid #1f2937; background: linear-gradient(180deg,#051025,#021018); display: flex; flex-direction: column; gap: 6px; min-height: 92px }
+    .slot-id { font-weight: 700; font-size: 15px; }
+    .slot-status { font-size: 13px; font-weight: 700; }
     .slot-status.empty { color: #22c55e; }
     .slot-status.occupied { color: #f97373; }
     .slot-status.invalid { color: #facc15; }
-    .slot-conf { font-size: 12px; color: #9ca3af; }
-    .slot-duration { font-size: 12px; color: #9ca3af; }
-    .slot-purpose { font-size: 12px; color: #c7d2fe; }
-    .modal { position: fixed; left: 0; top: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-    .modal-box { background: #0b1220; padding: 20px; border-radius: 10px; width: 320px; border:1px solid #22303f; }
+    .slot-conf, .slot-duration, .slot-purpose { font-size: 12px; color: #9ca3af; white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
+
+    /* Logs below */
+    .logs-box { margin-top: 10px; border-radius:10px; border:1px solid #122030; padding:8px; background:#081025; color:#9ca3af; max-height:180px; overflow:auto; }
+
+    /* small screen behavior: stack vertically */
+    @media (max-width: 1100px) {
+      .main-flex { flex-direction: column; }
+      .camera-col, .slots-panel { flex: none; width: 100%; }
+      .camera-box { width:100%; height:360px }
+      .slots-grid { grid-template-columns: repeat(2, 1fr); }
+    }
   </style>
 </head>
 <body>
@@ -474,24 +497,42 @@ DASHBOARD_HTML = """
       <span id="last-updated">Last update: --</span>
     </div>
   </header>
-  <main>
-    <div class="summary">
-      <div class="card"><h2>Empty slots</h2><p><span id="empty-count">0</span></p></div>
-      <div class="card"><h2>Occupied slots</h2><p><span id="occupied-count">0</span></p></div>
-      <div class="card"><h2>Total slots</h2><p><span id="total-count">0</span></p></div>
-    </div>
-    <div style="margin-bottom:24px;">
-      <h2 style="font-size:16px; margin:0 0 8px 0;">Live Camera Preview</h2>
-      <div style="border-radius:12px; overflow:hidden; border:1px solid #1f2937; max-width:640px;">
-        <img id="camera-feed" src="/video_feed" style="display:block; width:100%; height:auto;" />
-      </div>
-    </div>
-    <div class="slots-grid" id="slots-grid"></div>
-    <div style="margin-top:20px;"><h3 style="margin:0 0 8px 0;">Recent occupancy logs</h3>
-      <div id="logs" style="font-size:13px; color:#9ca3af; max-height:180px; overflow:auto; background:#081025; padding:8px; border-radius:8px; border:1px solid #122030;"></div>
-    </div>
-  </main>
 
+  <div class="container">
+    <div class="main-flex">
+
+      <!-- Left: Camera (fixed size column) -->
+      <div class="camera-col">
+        <div style="margin-bottom:8px;">
+          <h2 style="font-size:16px; margin:0 0 6px 0; color:#e5e7eb;">Live Camera Preview</h2>
+        </div>
+        <div class="camera-box">
+          <img id="camera-feed" src="/video_feed" alt="camera feed" />
+        </div>
+      </div>
+
+      <!-- Right: Slots panel with summary, grid (3x2), logs -->
+      <div class="slots-panel">
+        <div class="summary">
+          <div class="card"><h2>Empty</h2><p><span id="empty-count">0</span></p></div>
+          <div class="card"><h2>Occupied</h2><p><span id="occupied-count">0</span></p></div>
+          <div class="card"><h2>Total</h2><p><span id="total-count">0</span></p></div>
+        </div>
+
+        <div class="slots-grid" id="slots-grid" aria-live="polite">
+          <!-- JS will populate slot boxes here (3 columns) -->
+        </div>
+
+        <div style="margin-top:6px;">
+          <h3 style="margin:6px 0 8px 0;">Recent occupancy logs</h3>
+          <div class="logs-box" id="logs"></div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Purpose modal (unchanged) -->
   <div id="purpose-modal" style="display:none;" class="modal">
     <div class="modal-box">
       <h3 id="modal-title">Set purpose</h3>
@@ -512,32 +553,35 @@ DASHBOARD_HTML = """
   </div>
 
   <script>
+    // Re-use existing fetchStatus/fetchLogs + rendering logic but target the new slots-grid
     let awaitingPurposeFor = null;
     async function fetchStatus() {
       try {
         const res = await fetch('/api/status'); if (!res.ok) return; const data = await res.json(); const slots = data.slot_status || {}; const grid = document.getElementById('slots-grid'); grid.innerHTML = '';
         let emptyCount=0, occCount=0; const ids = Object.keys(slots).sort();
+
         ids.forEach(id => {
           const info = slots[id]; const status = info.status||'unknown'; const conf = info.conf||0; const last_dur = info.last_duration||0; const total_occ = info.total_occupied||0; const purpose = info.purpose||null; const expected_end = info.expected_end||null;
           if (status==='empty') emptyCount++; if(status==='occupied') occCount++;
+
           const div = document.createElement('div'); div.className='slot';
           const idEl=document.createElement('div'); idEl.className='slot-id'; idEl.textContent=id;
           const statusEl=document.createElement('div'); statusEl.className='slot-status '+status; statusEl.textContent=status.toUpperCase();
           const confEl=document.createElement('div'); confEl.className='slot-conf'; confEl.textContent='Confidence: '+(conf*100).toFixed(1)+'%';
-          const durEl=document.createElement('div'); durEl.className='slot-duration'; durEl.textContent='Last occ: '+(last_dur>0?(Math.round(last_dur)+'s'):'--')+' | Total: '+Math.round(total_occ)+'s';
-          const purposeEl=document.createElement('div'); purposeEl.className='slot-purpose';           if (purpose) {
-            // prefer model prediction if available
+          const durEl=document.createElement('div'); durEl.className='slot-duration'; durEl.textContent='Last occ: '+(last_dur>0?(Math.round(last_dur)+'s'):'0s')+' | Total: '+Math.round(total_occ)+'s';
+          const purposeEl=document.createElement('div'); purposeEl.className='slot-purpose';
+
+          if (purpose) {
             if (info.predicted_duration != null) {
               const mean = Math.round(info.predicted_duration);
               const std = Math.round(info.predicted_std || 0);
-              const conf = Math.round((info.predicted_confidence || 0) * 100);
+              const confScore = Math.round((info.predicted_confidence || 0) * 100);
               const rem = Math.round(info.predicted_remaining || 0);
               const mins = Math.floor(rem / 60);
               const secs = Math.round(rem % 60);
               const remText = mins + 'm ' + secs + 's';
-              purposeEl.textContent = `Purpose: ${purpose} | Pred: ${Math.round(mean/60)}m ± ${Math.round(std/60)}m | Remaining: ${remText} | Conf: ${conf}%`;
+              purposeEl.textContent = `Purpose: ${purpose} | Pred: ${Math.round(mean/60)}m ± ${Math.round(std/60)}m | Remaining: ${remText} | Conf: ${confScore}%`;
             } else {
-              // fallback to expected_end countdown
               let remText = '--';
               if (expected_end) {
                 const rem = Math.max(0, Math.round(expected_end - (Date.now()/1000)));
@@ -550,12 +594,18 @@ DASHBOARD_HTML = """
           } else {
             purposeEl.textContent = 'Purpose: -';
           }
-          div.appendChild(idEl); div.appendChild(statusEl); div.appendChild(confEl); div.appendChild(durEl); div.appendChild(purposeEl); grid.appendChild(div);
+
+          div.appendChild(idEl); div.appendChild(statusEl); div.appendChild(confEl); div.appendChild(durEl); div.appendChild(purposeEl);
+          grid.appendChild(div);
+
           if(status==='occupied' && !purpose && !awaitingPurposeFor){awaitingPurposeFor=id; showPurposeModal(id);}        });
+
         document.getElementById('empty-count').textContent=emptyCount; document.getElementById('occupied-count').textContent=occCount; document.getElementById('total-count').textContent=ids.length; document.getElementById('last-updated').textContent='Last update: '+(new Date()).toLocaleTimeString();
       } catch(e){console.error(e);} }
+
     function showPurposeModal(slotId){const modal=document.getElementById('purpose-modal'); modal.style.display='flex'; document.getElementById('modal-title').textContent=`Set purpose for ${slotId}`; document.getElementById('modal-cancel').onclick=function(){modal.style.display='none'; awaitingPurposeFor=null}; document.getElementById('modal-save').onclick=async function(){const val=document.getElementById('purpose-select').value; try{await fetch('/api/set_purpose',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({slot_id:slotId,purpose:val})});}catch(e){console.error(e);} modal.style.display='none'; awaitingPurposeFor=null;}}
-    async function fetchLogs(){try{const res=await fetch('/api/logs'); if(!res.ok) return; const data=await res.json(); const logs=data.logs||[]; const el=document.getElementById('logs'); el.innerHTML=''; logs.forEach(l=>{const row=document.createElement('div'); row.textContent=`${l.timestamp}  ${l.slot_id}  ${l.duration_seconds}s`; el.appendChild(row);});}catch(e){console.error(e);}}
+
+    async function fetchLogs(){try{const res=await fetch('/api/logs'); if(!res.ok) return; const data=await res.json(); const logs=data.logs||[]; const el=document.getElementById('logs'); el.innerHTML=''; logs.forEach(l=>{const row=document.createElement('div'); row.textContent=`${l.timestamp}  ${l.slot_id}  ${l.duration_seconds}s`; el.appendChild(row);});}catch(e){console.error(e);} }
     setInterval(()=>{fetchStatus();fetchLogs();},1000); window.onload=()=>{fetchStatus();fetchLogs();};
   </script>
 </body>
