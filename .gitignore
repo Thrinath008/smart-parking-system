@@ -48,12 +48,10 @@ parking-ai/
 .DS_Store
 
 # OpenCV / dataset data
-# data/raw/
-# data/processed/rois.json.bak
+
 
 # # Model outputs
-# models/trained/
-# models/onnx/
+
 
 # Logs
 *.log
